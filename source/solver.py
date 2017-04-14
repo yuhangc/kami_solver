@@ -10,12 +10,14 @@ from mpl_toolkits.mplot3d import Axes3D
 class PuzzleSolver:
     def __init__(self, num_steps, num_colors=None):
         # original image and abstracted graph of the puzzle
+        self.puzzle_id = None
         self.puzzle_img = None
         self.puzzle_graph = None
 
         # number of steps and colors total
         self.num_steps = num_steps
         self.num_colors = num_colors
+        self.num_colors_left = num_colors
 
         # FIXME: hard-code in the separation in color panel
         self.color_panel_separate = 300
@@ -44,7 +46,10 @@ class PuzzleSolver:
         self.n_cells_w = 20
         self.cell_height = None
         self.cell_width = None
-        self.cell_color = -np.ones((self.n_cells_h, self.n_cells_w))
+
+        # variables that store cell color and patch number
+        self.cell_color = -np.ones((self.n_cells_h, self.n_cells_w), dtype=int)
+        self.cell_patch = -np.ones((self.n_cells_h, self.n_cells_w), dtype=int)
 
         # increment in (h, w) for connectivity
         self.inc = np.array([[-1, 0],  [1, 0], [0, -1], [0, 1]])
@@ -56,7 +61,19 @@ class PuzzleSolver:
         # fast lookup for cell vertex locations
         self.cell_vertices = None
 
+        # number of patches and patch properties
+        self.num_patches = 0
+        self.patch_connect = None
+        self.patch_adj = []
+        self.patch_size = None
+        self.patch_color = None
+
+        # number of patches in certain color
+        self.num_patches_color = None
+
     def load_puzzle(self, puzzle_id, search_dir=None, down_sample=True, show=False, enhance=True):
+        self.puzzle_id = puzzle_id
+
         if search_dir is None:
             puzzle_file = "../puzzles/{0}.PNG".format(puzzle_id)
         else:
@@ -150,6 +167,100 @@ class PuzzleSolver:
         #         dist_min = np.linalg.norm(dist)
         #         self.cell_color[xh, xw] = k
 
+    def flood_fill(self, xh, xw, patch_number, patch_color):
+        if xh < 0 or xh >= self.n_cells_h or xw < 0 or xw >= self.n_cells_w:
+            return
+
+        if self.cell_patch[xh, xw] != -1 or self.cell_color[xh, xw] != patch_color:
+            return
+
+        # assign patch number to current cell
+        self.cell_patch[xh, xw] = patch_number
+
+        # look for neighbors
+        cell_type = self.cell_type(xh, xw)
+        for dir_inc in range(4):
+            if dir_inc == self.inc_mask[cell_type]:
+                continue
+            xh_new = xh + self.inc[dir_inc, 1]
+            xw_new = xw + self.inc[dir_inc, 0]
+            self.flood_fill(xh_new, xw_new, patch_number, patch_color)
+
+    def draw_patches(self):
+        visited = np.zeros((self.num_patches, ))
+        img_labeled = deepcopy(self.puzzle_img)
+
+        for xh in range(self.n_cells_h):
+            for xw in range(self.n_cells_w):
+                patch_id = self.cell_patch[xh, xw]
+                if not visited[patch_id]:
+                    cell_type = self.cell_type(xh, xw)
+                    if cell_type == 0 or cell_type == 2:
+                        xw_mid = int((xw / 2) * self.cell_width)
+                    else:
+                        xw_mid = int((xw / 2 + 0.5) * self.cell_width)
+                    if cell_type == 0 or cell_type == 3:
+                        xh_mid = int((xh + 0.5) * self.cell_height)
+                    else:
+                        xh_mid = int((xh + 1) * self.cell_height)
+                    cv2.putText(img_labeled, "{0}".format(patch_id), (xw_mid, xh_mid),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255))
+                    visited[patch_id] = 1
+
+        color_panel_height = 50
+        img_color_panel = np.zeros((color_panel_height, img_labeled.shape[1], img_labeled.shape[2]), dtype=np.uint8)
+        for k in range(self.num_colors):
+            pt1 = (self.width * k / self.num_colors, 0)
+            pt2 = (self.width * (k + 1) / self.num_colors, color_panel_height - 1)
+            color = (self.colors[k][0], self.colors[k][1], 127)
+            cv2.rectangle(img_color_panel, pt1, pt2, color, -1)
+
+        img_color_panel = cv2.cvtColor(img_color_panel, cv2.COLOR_HSV2RGB)
+        img_labeled = np.vstack((img_labeled, img_color_panel))
+        cv2.imshow("patches", img_labeled)
+        cv2.waitKey(0)
+
+        # save to solution folder
+        save_dir = "../solutions/{0}.png".format(self.puzzle_id)
+        cv2.imwrite(save_dir, img_labeled)
+
+    def count_and_connect_patches(self):
+        self.patch_connect = np.zeros((self.num_patches, self.num_patches), dtype=int)
+        self.patch_size = np.zeros((self.num_patches, ), dtype=int)
+        self.patch_color = np.zeros((self.num_patches,), dtype=int)
+
+        for xh in range(self.n_cells_h):
+            for xw in range(self.n_cells_w):
+                # update patch size and color
+                self.patch_size[self.cell_patch[xh, xw]] += 1
+                self.patch_color[self.cell_patch[xh, xw]] = self.cell_color[xh, xw]
+                cell_type = self.cell_type(xh, xw)
+                for dir_inc in range(4):
+                    if dir_inc == self.inc_mask[cell_type]:
+                        continue
+                    xh_new = xh + self.inc[dir_inc, 1]
+                    xw_new = xw + self.inc[dir_inc, 0]
+                    if 0 <= xh_new < self.n_cells_h and 0 <= xw_new < self.n_cells_w:
+                        # update patch connectivity
+                        self.patch_connect[self.cell_patch[xh, xw],
+                                           self.cell_patch[xh_new, xw_new]] = 1
+
+        # set self connection to false
+        for patch_id in range(self.num_patches):
+            self.patch_connect[patch_id, patch_id] = 0
+
+        # construct the adjacency list
+        for patch_id in range(self.num_patches):
+            neighbors = []
+            for patch_next in range(self.num_patches):
+                if self.patch_connect[patch_id, patch_next]:
+                    neighbors.append(patch_next)
+            self.patch_adj.append(neighbors)
+
+        # plt.clf()
+        # plt.imshow(self.patch_connect)
+        # plt.show()
+
     def construct_puzzle_graph(self, show=False):
         # decompose the image into triangle cells
         for xh in range(self.n_cells_h):
@@ -160,34 +271,26 @@ class PuzzleSolver:
         plt.imshow(self.cell_color)
         plt.show()
 
-        # convert the puzzle image to hsv color space
-        # puzzle_hsv = cv2.cvtColor(self.puzzle_img, cv2.COLOR_RGB2HSV)
-        #
-        # for k in range(self.num_colors):
-        #     h_low, h_high, s_low, s_high = self.colors[k]
-        #
-        #     # find segments of each color
-        #     range_low = np.array([h_low-1, s_low-10, 0])
-        #     range_high = np.array([h_high+1, s_high+10, 255])
-        #     mask = cv2.inRange(puzzle_hsv, range_low, range_high)
-        #
-        #     # display result
-        #     if show:
-        #         res = cv2.bitwise_and(self.puzzle_img, self.puzzle_img, mask=mask)
-        #         cv2.imshow("image", res)
-        #         cv2.waitKey(0)
+        # find all patches
+        self.num_patches_color = np.zeros((self.num_colors, ))
+
+        for xh in range(self.n_cells_h):
+            for xw in range(self.n_cells_w):
+                if self.cell_patch[xh, xw] < 0:
+                    self.flood_fill(xh, xw, self.num_patches, self.cell_color[xh, xw])
+                    self.num_patches_color[self.cell_color[xh, xw]] += 1
+                    self.num_patches += 1
+
+        self.draw_patches()
+
+        # count patch size and find connectivity
+        self.count_and_connect_patches()
 
     def pre_process_colors(self, show=False):
         gray = cv2.cvtColor(self.puzzle_img, cv2.COLOR_RGB2GRAY)
-        # if show:
-        #     cv2.imshow("image", gray)
-        #     cv2.waitKey(0)
 
         # find the horizontal line
         edges = cv2.Canny(gray, 30, 150, apertureSize=3)
-        # if show:
-        #     cv2.imshow("image", edges)
-        #     cv2.waitKey(0)
 
         lines = cv2.HoughLines(edges, 1, np.pi / 180.0, 100, min_theta=np.pi / 2.1, max_theta=np.pi / 1.9)
 
@@ -274,8 +377,93 @@ class PuzzleSolver:
             self.colors.append(np.array([h_val, 0.5 * (s_val_low + s_val_high),
                                          1.0, 0.5 * (s_val_high - s_val_low)]))
 
-    def solve_puzzle(self):
-        pass
+    def simple_solver(self, steps_left, connect, adj, sol, valid_patch, num_patches_color):
+        # simple prunes
+        num_colors_unconnected = 0
+        num_colors_left = 0
+        for n_patches in num_patches_color:
+            if n_patches > 1:
+                num_colors_unconnected += 1
+            if n_patches > 0:
+                num_colors_left += 1
+
+        # no solution if number of unconnected colors are more than steps left
+        if num_colors_left > steps_left + 1 or num_colors_unconnected > steps_left:
+            return False
+
+        # if have solution
+        if num_colors_left == 1:
+            return True
+
+        # current step for labeling connectivity, starting from 2
+        step_curr = self.num_steps - steps_left
+
+        # try all patches and all colors
+        for patch_id in range(self.num_patches):
+            if not valid_patch[patch_id]:
+                continue
+            for color_id in range(self.num_colors):
+                if num_patches_color[color_id] == 0 or color_id == self.patch_color[patch_id]:
+                    continue
+                # if step_curr < 7:
+                #     print step_curr, patch_id, color_id
+                # make current patch current color
+                color_old = self.patch_color[patch_id]
+                self.patch_color[patch_id] = color_id
+
+                # update solution
+                sol.append((patch_id, color_id))
+
+                # update number of patches of
+                # each color
+                num_patches_color_new = deepcopy(num_patches_color)
+                num_patches_color_new[color_old] -= 1
+                num_patches_color_new[color_id] += 1
+
+                # update connectivity
+                adj_new = deepcopy(adj)
+                valid_patch_new = deepcopy(valid_patch)
+                for patch_next in adj[patch_id]:
+                    if valid_patch[patch_next] and self.patch_color[patch_next] == color_id:
+                        # update number of patches for each color
+                        num_patches_color_new[color_id] -= 1
+                        # invalidate the patch
+                        valid_patch_new[patch_next] = 0
+
+                        # connect all neighbors of patch_next to current patch
+                        # temporarily invalidate current patch
+                        valid_patch_new[patch_id] = 0
+                        for patch_next_next in adj[patch_next]:
+                            if valid_patch_new[patch_next_next] and adj_new[patch_id].count(patch_next_next) == 0:
+                                adj_new[patch_id].append(patch_next_next)
+                                adj_new[patch_next_next].remove(patch_next)
+                                adj_new[patch_next_next].append(patch_id)
+                        valid_patch_new[patch_id] = 1
+
+                # only recurse down if adjacent patches have the same color
+                if num_patches_color_new[color_id] <= num_patches_color[color_id]:
+                    have_sol = self.simple_solver(steps_left - 1, connect, adj_new,
+                                                  sol, valid_patch_new, num_patches_color_new)
+                    if have_sol:
+                        return True
+
+                # restore everything
+                self.patch_color[patch_id] = color_old
+                sol.pop()
+
+        # couldn't find solution if reach here
+        return False
+
+    def solve_puzzle(self, solver_id=0):
+        self.sol = []
+        if solver_id == 0:
+            valid_patch = np.ones((self.num_patches, ), dtype=int)
+            have_sol = self.simple_solver(self.num_steps, self.patch_connect, self.patch_adj,
+                                          self.sol, valid_patch, self.num_patches_color)
+            if not have_sol:
+                raise Exception("Couldn't find solution!")
+
+        print self.sol
 
     def visualize_solution(self):
         pass
