@@ -30,6 +30,7 @@ class PuzzleSolver:
 
         # FIXME: hard-code in the saturation limit for classification
         self.sat_limit = 50
+        self.val_limit = 50
 
         # list storing the colors hsv value
         self.colors = []
@@ -71,13 +72,13 @@ class PuzzleSolver:
         # number of patches in certain color
         self.num_patches_color = None
 
-    def load_puzzle(self, puzzle_id, search_dir=None, down_sample=True, show=False, enhance=True):
+    def load_puzzle(self, puzzle_id, puzzle_suf="", search_dir=None, down_sample=True, show=False):
         self.puzzle_id = puzzle_id
 
         if search_dir is None:
-            puzzle_file = "../puzzles/{0}.PNG".format(puzzle_id)
+            puzzle_file = "../puzzles/{0}{1}.PNG".format(puzzle_id, puzzle_suf)
         else:
-            puzzle_file = "{0}/{1}.PNG".format(search_dir, puzzle_id)
+            puzzle_file = "{0}/{1}{2}.PNG".format(search_dir, puzzle_id, puzzle_suf)
 
         self.puzzle_img = cv2.imread(puzzle_file)
 
@@ -85,12 +86,6 @@ class PuzzleSolver:
         if down_sample:
             self.puzzle_img = cv2.resize(self.puzzle_img, None, fx=0.5, fy=0.5)
             self.color_panel_separate /= 2
-
-        # optionally increase contrast
-        # if enhance:
-        #     self.puzzle_img = cv2.cvtColor(self.puzzle_img, cv2.COLOR_RGB2HSV)
-        #     self.puzzle_img[:, :, 1] = cv2.multiply(self.puzzle_img[:, :, 1], np.array([1.0]))
-        #     self.puzzle_img = cv2.cvtColor(self.puzzle_img, cv2.COLOR_HSV2RGB)
 
         # optionally show the puzzle image
         if show:
@@ -144,28 +139,25 @@ class PuzzleSolver:
 
         # obtain the region of interest
         roi = cv2.bitwise_and(puzzle_local, puzzle_local, mask=mask)
-        # cv2.imshow("image", roi)
-        # cv2.waitKey(0)
 
         # classify the region
         roi = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
         hsv_mean = cv2.mean(roi, mask=mask)
-        # hsv_mean = np.mean(roi, axis=(0, 1))
+        hsv_mean = hsv_mean[:3]
 
         # if saturation is low classify by saturation, otherwise classify by hue
         colors = np.array(self.colors)
-        if hsv_mean[1] < self.sat_limit:
-            s_diff = np.abs(colors[:, 1] - hsv_mean[1]) / colors[:, 3]
-            self.cell_color[xh, xw] = np.argmin(s_diff)
-        else:
-            h_diff = np.abs(colors[:, 0] - hsv_mean[0]) / colors[:, 2]
-            self.cell_color[xh, xw] = np.argmin(h_diff)
 
-        # for k in range(self.num_colors):
-        #     dist = (hsv_mean[:2] - self.colors[k][:2]) / self.colors[k][2:]
-        #     if np.linalg.norm(dist) < dist_min:
-        #         dist_min = np.linalg.norm(dist)
-        #         self.cell_color[xh, xw] = k
+        # if saturation and brightness is not too low classify using hue
+        if hsv_mean[1] > self.sat_limit and hsv_mean[2] > self.sat_limit:
+            hsv_diff = np.abs(colors - hsv_mean)
+            hsv_diff = hsv_diff[:, 0]**2 + hsv_diff[:, 1]**2 + hsv_diff[:, 2]**2
+            self.cell_color[xh, xw] = np.argmin(hsv_diff)
+        else:
+            # classify using saturation and value
+            sv_diff = np.abs(colors[:, 1:] - hsv_mean[1:])
+            sv_diff = sv_diff[:, 0]**2 + sv_diff[:, 1]**2
+            self.cell_color[xh, xw] = np.argmin(sv_diff)
 
     def flood_fill(self, xh, xw, patch_number, patch_color):
         if xh < 0 or xh >= self.n_cells_h or xw < 0 or xw >= self.n_cells_w:
@@ -212,8 +204,8 @@ class PuzzleSolver:
         for k in range(self.num_colors):
             pt1 = (self.width * k / self.num_colors, 0)
             pt2 = (self.width * (k + 1) / self.num_colors, color_panel_height - 1)
-            color = (self.colors[k][0], self.colors[k][1], 127)
-            cv2.rectangle(img_color_panel, pt1, pt2, color, -1)
+            # color = (self.colors[k][0], self.colors[k][1], 127)
+            cv2.rectangle(img_color_panel, pt1, pt2, self.colors[k], -1)
 
         img_color_panel = cv2.cvtColor(img_color_panel, cv2.COLOR_HSV2RGB)
         img_labeled = np.vstack((img_labeled, img_color_panel))
@@ -335,15 +327,6 @@ class PuzzleSolver:
         # directly using the puzzle image to do clustering and count colors
         color_panel = cv2.cvtColor(color_panel, cv2.COLOR_RGB2HSV)
         hist1 = cv2.calcHist([color_panel], [0], None, [180], [0, 180])
-        hist2 = cv2.calcHist([color_panel], [0, 1], None, [180, 256], [0, 180, 0, 256])
-
-        # show 1d and 2d histogram for inspection
-        # if show:
-        #     plt.subplot(2, 1, 1)
-        #     plt.plot(hist1)
-        #     plt.subplot(2, 1, 2)
-        #     plt.imshow(hist2, interpolation='nearest')
-        #     plt.show()
 
         # manually find the largest peak values and indices
         hist1 = hist1.reshape((len(hist1,)))
@@ -362,20 +345,25 @@ class PuzzleSolver:
         elif self.num_colors != len(idx_plot[0]):
             raise Exception("incorrect number of colors detected!")
 
-        # record the HS values of the peaks
+        # record hsv values of the peaks
         for k in range(self.num_colors):
-            h_val = idx_plot[0, k]
-            hist_strip = hist2[h_val-1:h_val+1, :]
-            idx_sat = np.where(hist_strip > self.min_count_sat)
-            s_val_low = min(idx_sat[1])
-            s_val_high = max(idx_sat[1])
+            # extract each color region
+            lb = np.array([idx_plot[0, k] - 1, 0, 0])
+            up = np.array([idx_plot[0, k] + 1, 255, 255])
+            mask = cv2.inRange(color_panel, lb, up)
 
-            # record the color in format (hue_low, hue_high, sat_low, sat_high)
-            # self.colors.append((h_val - self.h_val_width, h_val + self.h_val_width,
-            #                     s_val_low, s_val_high))
-            # record the color in format (h, s, h_var, s_var)
-            self.colors.append(np.array([h_val, 0.5 * (s_val_low + s_val_high),
-                                         1.0, 0.5 * (s_val_high - s_val_low)]))
+            # filter the mask to remove noises
+            kernel = np.ones((2, 2), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+            # cv2.imshow("image", mask)
+            # cv2.waitKey(0)
+            hsv_mean = cv2.mean(color_panel, mask=mask)
+            print hsv_mean
+
+            # record the means
+            self.colors.append(hsv_mean[:3])
 
     def simple_solver(self, steps_left, connect, adj, sol, valid_patch, num_patches_color):
         # simple prunes
@@ -405,7 +393,7 @@ class PuzzleSolver:
             for color_id in range(self.num_colors):
                 if num_patches_color[color_id] == 0 or color_id == self.patch_color[patch_id]:
                     continue
-                # if step_curr < 7:
+                # if step_curr < 4:
                 #     print step_curr, patch_id, color_id
                 # make current patch current color
                 color_old = self.patch_color[patch_id]
