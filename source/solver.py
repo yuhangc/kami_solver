@@ -69,8 +69,16 @@ class PuzzleSolver:
         self.patch_size = None
         self.patch_color = None
 
+        # shortest path between all patches
+        self.patch_shortest = None
+        self.patch_longest_shortest = None
+        self.reorder_patch = None
+
         # number of patches in certain color
         self.num_patches_color = None
+
+        # parameters for the solver
+        self.solver_params = {}
 
     def load_puzzle(self, puzzle_id, puzzle_suf="", search_dir=None, down_sample=True, show=False):
         self.puzzle_id = puzzle_id
@@ -253,6 +261,32 @@ class PuzzleSolver:
         # plt.imshow(self.patch_connect)
         # plt.show()
 
+    def find_patch_shortest_paths(self):
+        self.patch_shortest = self.num_patches * np.ones((self.num_patches, self.num_patches), dtype=int)
+        self.patch_longest_shortest = np.zeros((self.num_patches, ), dtype=int)
+
+        # use floyd algorithm to calculate shorted path between patches
+        for i in range(self.num_patches):
+            for j in range(self.num_patches):
+                if self.patch_connect[i, j]:
+                    self.patch_shortest[i, j] = 1
+                    self.patch_shortest[j, i] = 1
+
+        for i in range(self.num_patches):
+            self.patch_shortest[i, i] = 0
+
+        for k in range(self.num_patches):
+            for i in range(self.num_patches):
+                for j in range(self.num_patches):
+                    if self.patch_shortest[i, j] > self.patch_shortest[i, k] + self.patch_shortest[k, j]:
+                        self.patch_shortest[i, j] = self.patch_shortest[i, k] + self.patch_shortest[k, j]
+
+        # find the longest of the shortest path of each patch
+        self.patch_longest_shortest = np.max(self.patch_shortest, axis=0)
+
+        # sort the patch id based on longest shortest path
+        self.reorder_patch = np.argsort(self.patch_longest_shortest)
+
     def construct_puzzle_graph(self, show=False):
         # decompose the image into triangle cells
         for xh in range(self.n_cells_h):
@@ -277,6 +311,9 @@ class PuzzleSolver:
 
         # count patch size and find connectivity
         self.count_and_connect_patches()
+
+        # find the shortest path between patches
+        self.find_patch_shortest_paths()
 
     def pre_process_colors(self, show=False):
         gray = cv2.cvtColor(self.puzzle_img, cv2.COLOR_RGB2GRAY)
@@ -365,7 +402,7 @@ class PuzzleSolver:
             # record the means
             self.colors.append(hsv_mean[:3])
 
-    def simple_solver(self, steps_left, connect, adj, sol, valid_patch, num_patches_color):
+    def simple_solver(self, steps_left, connect, adj, sol, valid_patch, num_patches_color, last_patch=None):
         # simple prunes
         num_colors_unconnected = 0
         num_colors_left = 0
@@ -383,18 +420,25 @@ class PuzzleSolver:
         if num_colors_left == 1:
             return True
 
-        # current step for labeling connectivity, starting from 2
-        step_curr = self.num_steps - steps_left
+        # current step for labeling connectivity, starting from 1
+        step_curr = self.num_steps - steps_left + 1
+
+        # set patches for iteration
+        if self.solver_params["stick_to_one_patch"] and step_curr >= self.solver_params["STOP_start_step"]:
+            patches_iter = [last_patch]
+        else:
+            patches_iter = self.reorder_patch.tolist()
 
         # try all patches and all colors
-        for patch_id in range(self.num_patches):
+        for patch_id in patches_iter:
+            # patch_id = self.reorder_patch[patch_id_]
             if not valid_patch[patch_id]:
                 continue
             for color_id in range(self.num_colors):
                 if num_patches_color[color_id] == 0 or color_id == self.patch_color[patch_id]:
                     continue
-                # if step_curr < 4:
-                #     print step_curr, patch_id, color_id
+                if step_curr < 2:
+                    print step_curr, patch_id, color_id
                 # make current patch current color
                 color_old = self.patch_color[patch_id]
                 self.patch_color[patch_id] = color_id
@@ -430,8 +474,8 @@ class PuzzleSolver:
 
                 # only recurse down if adjacent patches have the same color
                 if num_patches_color_new[color_id] <= num_patches_color[color_id]:
-                    have_sol = self.simple_solver(steps_left - 1, connect, adj_new,
-                                                  sol, valid_patch_new, num_patches_color_new)
+                    have_sol = self.simple_solver(steps_left - 1, connect, adj_new, sol,
+                                                  valid_patch_new, num_patches_color_new, patch_id)
                     if have_sol:
                         return True
 
@@ -452,6 +496,14 @@ class PuzzleSolver:
                 raise Exception("Couldn't find solution!")
 
         print self.sol
+
+    def set_solver_param(self, param_name, param_value):
+        """
+        Set parameters for the solver
+        :param param_name: list of parameter names in string
+        :param param_value: list of parameter values
+        """
+        self.solver_params[param_name] = param_value
 
     def visualize_solution(self):
         pass
